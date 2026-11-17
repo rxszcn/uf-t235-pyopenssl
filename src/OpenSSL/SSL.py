@@ -3092,6 +3092,33 @@ class Connection:
         result = _lib.SSL_set_session(self._ssl, session._session)
         _openssl_assert(result == 1)
 
+    def session_reused(self) -> bool:
+        """
+        Determine whether the session used by this connection was resumed
+        from a previous session (via :meth:`set_session` or a session
+        ticket) instead of being negotiated by a full handshake.
+
+        This may be called at any time.  Before the handshake has completed
+        it returns ``False``, because no session has been established yet;
+        after a successful handshake it reflects whether that handshake
+        resumed a previous session.  The result is symmetric: for a resumed
+        session both the client and the server side of the connection
+        report ``True``.
+
+        This is useful for observability: on a resumed session OpenSSL does
+        not re-run certificate path validation, so
+        :meth:`get_verified_chain` returns ``None`` even though the peer
+        was authenticated when the session was originally established.
+        Checking this method lets callers distinguish that case from a
+        connection where verification never happened.
+
+        :return: ``True`` if the current session was resumed from a
+            previous one, ``False`` otherwise.
+
+        .. versionadded:: 26.4.1
+        """
+        return bool(_lib.SSL_session_reused(self._ssl))
+
     def _get_finished_message(
         self, function: Callable[[Any, Any, int], int]
     ) -> bytes | None:

@@ -2454,6 +2454,144 @@ class TestSession:
         assert isinstance(new_session, Session)
 
 
+class TestSessionReuse:
+    """
+    Tests for `Connection.session_reused` and for the observable behavior
+    of `Connection.get_verified_chain` on resumed sessions.
+    """
+
+    @staticmethod
+    def _resumed_pair() -> tuple[Connection, Connection, Connection]:
+        """
+        Perform a full TLS 1.2 handshake in memory, with the client
+        verifying the server's certificate chain, then perform a second
+        handshake that resumes the first connection's session.
+
+        Returns ``(original_client, resumed_client, resumed_server)``.
+        """
+        [(_, cacert), (_, icert), (skey, scert)] = _create_certificate_chain()
+
+        server_ctx = Context(TLSv1_2_METHOD)
+        server_ctx.use_privatekey(skey)
+        server_ctx.use_certificate(scert)
+        server_ctx.add_extra_chain_cert(icert.to_cryptography())
+        server_ctx.add_extra_chain_cert(cacert)
+        server_ctx.set_session_id(b"session-reuse-test")
+
+        client_ctx = Context(SSLv23_METHOD)
+        # cacert is self-signed so the client must trust it for verification
+        # to succeed.
+        cert_store = client_ctx.get_cert_store()
+        assert cert_store is not None
+        cert_store.add_cert(cacert)
+        client_ctx.set_verify(VERIFY_PEER, verify_cb)
+
+        original_server = Connection(server_ctx, None)
+        original_client = Connection(client_ctx, None)
+        handshake_in_memory(original_client, original_server)
+
+        session = original_client.get_session()
+        assert session is not None
+
+        resumed_server = Connection(server_ctx, None)
+        resumed_client = Connection(client_ctx, None)
+        resumed_client.set_session(session)
+        handshake_in_memory(resumed_client, resumed_server)
+
+        return original_client, resumed_client, resumed_server
+
+    def test_new_connection_not_reused(self) -> None:
+        """
+        `Connection.session_reused` returns `False` before the handshake
+        and, for a connection established by a full handshake, after it —
+        on both ends of the connection.  This agrees with the low-level
+        `SSL_session_reused` binding.
+        """
+        server_ctx = Context(SSLv23_METHOD)
+        server_ctx.use_privatekey(
+            load_privatekey(FILETYPE_PEM, server_key_pem)
+        )
+        server_ctx.use_certificate(
+            load_certificate(FILETYPE_PEM, server_cert_pem)
+        )
+        server = Connection(server_ctx, None)
+        client = Connection(Context(SSLv23_METHOD), None)
+
+        # Before the handshake no session has been established yet, so
+        # nothing could have been reused.
+        assert client.session_reused() is False
+        assert server.session_reused() is False
+
+        handshake_in_memory(client, server)
+
+        assert client.session_reused() is False
+        assert server.session_reused() is False
+
+        # Cross-validate against the low-level binding.
+        assert client.session_reused() == bool(
+            _lib.SSL_session_reused(client._ssl)
+        )
+        assert server.session_reused() == bool(
+            _lib.SSL_session_reused(server._ssl)
+        )
+
+    def test_resumed_connection_client_side(self) -> None:
+        """
+        On the client side of a connection that resumed a previous session,
+        `Connection.session_reused` returns `True`, in agreement with the
+        low-level `SSL_session_reused` binding.
+        """
+        original_client, resumed_client, _ = self._resumed_pair()
+
+        assert original_client.session_reused() is False
+        assert resumed_client.session_reused() is True
+
+        # Cross-validate against the low-level binding.
+        assert resumed_client.session_reused() == bool(
+            _lib.SSL_session_reused(resumed_client._ssl)
+        )
+
+    def test_resumed_connection_server_side(self) -> None:
+        """
+        The reuse state is symmetric: on the server side of a connection
+        that resumed a previous session, `Connection.session_reused` also
+        returns `True`, in agreement with the low-level
+        `SSL_session_reused` binding.
+        """
+        _, resumed_client, resumed_server = self._resumed_pair()
+
+        assert resumed_client.session_reused() is True
+        assert resumed_server.session_reused() is True
+
+        # Cross-validate against the low-level binding.
+        assert resumed_server.session_reused() == bool(
+            _lib.SSL_session_reused(resumed_server._ssl)
+        )
+
+    def test_get_verified_chain_none_on_resumed(self) -> None:
+        """
+        Lock in the current behavior: OpenSSL does not re-run certificate
+        path validation when a session is resumed, so
+        `Connection.get_verified_chain` returns `None` on a resumed
+        connection even though the full handshake that established the
+        session verified the very same chain.  `Connection.session_reused`
+        is what lets callers tell "verified, but the chain is not retained"
+        apart from "never verified".
+        """
+        original_client, resumed_client, _ = self._resumed_pair()
+
+        # The full handshake verified and retained the chain.
+        chain = original_client.get_verified_chain()
+        assert chain is not None
+        assert len(chain) == 3
+
+        # The resumed handshake did not re-verify, so no verified chain is
+        # available even though the peer is the same.
+        assert resumed_client.session_reused() is True
+        assert resumed_client.get_verified_chain() is None
+        assert resumed_client.get_verified_chain(as_cryptography=True) is None
+
+
 @pytest.fixture(params=["context", "connection"])
 def ctx_or_conn(request: pytest.FixtureRequest) -> Context | Connection:
     ctx = Context(SSLv23_METHOD)

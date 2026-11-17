@@ -21,6 +21,12 @@ Deprecations:
 Changes:
 ^^^^^^^^
 
+- Added ``OpenSSL.SSL.Connection.session_reused()`` to determine whether the
+  connection's session was resumed from a previous session.  On resumed
+  sessions OpenSSL does not re-run certificate path validation, so
+  ``Connection.get_verified_chain()`` returns ``None``; the new method makes
+  it possible to distinguish that case from a connection that was never
+  verified.
 - Fixed a race in which an exception raised by a verify, ALPN selection, OCSP, or DTLS cookie callback for one ``Connection`` could be raised on an unrelated ``Connection`` created from the same ``Context`` and used concurrently from another thread. Exceptions from these callbacks are now tracked per ``Connection``. Discovered and reported by SecDim Security Research.
 - Fixed exceptions raised by a verify callback registered with ``Connection.set_verify`` being swallowed instead of being propagated to the caller.
 
